@@ -56,9 +56,12 @@ const {
 
 // --- Paths ---
 // Use process.cwd() to ensure paths are relative to where the script is run
+
+
 const BASE_DIR = process.cwd();
 const SESSION_DIR = path.join(BASE_DIR, 'auth_info');
 const SESSION_BACKUP_ZIP = path.join(BASE_DIR, 'auth_info_backup.zip'); // Specific backup name
+
 const LOG_DIR = path.join(BASE_DIR, 'logs');
 const LEVELS_FILE = path.join(BASE_DIR, 'levels.json');
 
@@ -626,6 +629,24 @@ async function restoreSessionFromBackup() {
     }
 }
 
+
+
+
+/**
+ * Sanitizes a JID (Jabber ID) string to a standard format.
+ */
+function sanitizeJid(jid) {
+    if (!jid || typeof jid !== 'string') return '';
+    if (jid.includes('@lid')) { return jid; } // Keep LID JIDs as is
+    if (jid.includes('@g.us')) { return `${jid.split('@')[0]}@g.us`; }
+    if (jid === 'status@broadcast') { return jid; }
+    if (jid.includes('@s.whatsapp.net')) { return `${jid.split('@')[0].replace(/[^0-9]/g, '')}@s.whatsapp.net`; }
+    const numberPart = jid.replace(/[^0-9]/g, '');
+    if (numberPart && numberPart.length > 5) { return `${numberPart}@s.whatsapp.net`; }
+    return '';
+}
+
+
 // ================== Connection Management ================== //
 // --- Uses local path & calls restore function ---
 /*/**
@@ -977,15 +998,16 @@ function containsRoast(text) {
 /**
  * Handles incoming messages received via the 'messages.upsert' event.
  * Parses, checks punishment/god mode, triggers typing sim, awards XP,
- * counts keywords, checks security, processes commands, triggers AI,
+ * counts keywords (DISABLED), checks security, processes commands, triggers AI,
  * handles VO, acknowledges stickers, updates history.
- * v9: Restored Typing Simulation Trigger with logging. Corrected order.
+ * FINAL VERSION: Corrected order and removed excessive debug logs.
  * @param {import('@whiskeysockets/baileys').BaileysEventMap['messages.upsert']} upsert The upsert event data.
  */
 async function handleMessages({ messages, type }) {
     if (type !== 'notify') { return; }
 
-    const comebacks = [ "Your mouth dey run like open-source repo!", "I dey code your obituary... 404 Not Found!", "Your IQ get expiration date like trial SSL!", "Even my error messages get more sense!" ]; // Example comebacks
+    // Define helpers locally or ensure they are accessible
+    const comebacks = [ "Your mouth dey run like open-source repo!", "I dey code your obituary... 404 Not Found!", "Your IQ get expiration date like trial SSL!", "Even my error messages get more sense!" ];
     function containsRoastInner(text) {
         const patterns = [ /stupid bot|dumb bot|tonnabot sucks/i, /you nor fit|no dey sabi/i, /useless bot|worthless bot/i ];
         return text && patterns.some(p => p.test(text));
@@ -996,260 +1018,189 @@ async function handleMessages({ messages, type }) {
 
         // 1. --- Ignore Irrelevant Messages ---
         if (msg.key?.remoteJid === 'status@broadcast' || msg.key?.fromMe || !msg.message || !msg.key?.remoteJid) {
-            continue;
+            continue; // Skip bot's own messages, status updates, etc.
         }
 
         // --- Get Sender Info ---
         const senderJid = sanitizeJid(msg.key?.participant || msg.key?.remoteJid);
         const ownerJid = sanitizeJid(config.OWNER_NUMBER);
         const isFromOwner = ownerJid && senderJid === ownerJid;
-        // logger.debug(`[TRACE v9 Step 2] Sender Info: ${senderJid}`); // Simplified trace
 
         // 2. --- Check if Sender is Punished ---
         const punishmentEndTime = state.punishedUsers.get(senderJid);
         if (punishmentEndTime) {
             if (Date.now() < punishmentEndTime) {
                 logger.info(`[Punishment] Ignoring message ${messageId} from punished user ${senderJid}`);
-                continue; // Skip ALL further processing
+                continue; // Ignore message if punishment active
             } else {
                 logger.info(`[Punishment] Punishment expired for ${senderJid}. Removing.`);
-                state.punishedUsers.delete(senderJid);
+                state.punishedUsers.delete(senderJid); // Remove expired entry
             }
         }
-        // logger.debug("[TRACE v9 Step 3] Passed Punishment Check."); // Simplified trace
+        // --- End Punishment Check ---
 
-        // --- *** Typing Simulation Trigger (RESTORED + Logging) *** ---
+
+        // 3. --- Typing Simulation Trigger ---
         try {
-            // logger.debug("[Typing Trigger] Checking conditions..."); // Simplified trace
             if (msg.key?.remoteJid?.endsWith('@g.us') && !state.nuclearAI) {
-                 // logger.debug("[Typing Trigger] Group & !NuclearAI OK."); // Simplified trace
                  const mc = getContentType(msg.message);
                  const txt = msg.message?.conversation || msg.message?.extendedTextMessage?.text ||
                             msg.message?.imageMessage?.caption || msg.message?.videoMessage?.caption;
                  const isNonCommandText = (txt && !txt.startsWith(config.COMMAND_PREFIX));
                  const isRelevantMedia = (!txt && ['imageMessage', 'videoMessage', 'audioMessage'].includes(mc));
-                 // logger.debug(`[Typing Trigger] isNonCommandText=${isNonCommandText}, isRelevantMedia=${isRelevantMedia}`); // Simplified trace
                  if (isNonCommandText || isRelevantMedia) {
-                     logger.info(`[Typing Trigger] Conditions MET for chat ${msg.key.remoteJid}. Calling simulateTyping...`);
-                     // *** Ensure simulateTyping function (debug v2 from msg #61) exists! ***
-                     simulateTyping(msg.key.remoteJid); // *** THE CALL IS HERE ***
-                 } // No need for else log here, too noisy
-             } // No need for else log here
+                     // logger.info(`[Typing Trigger] Conditions MET for chat ${msg.key.remoteJid}. Calling simulateTyping...`); // Keep log if needed
+                     simulateTyping(msg.key.remoteJid);
+                 }
+             }
         } catch(e) { logger.error(`!!! CRASH during typing simulation trigger check: ${e.message}`, e); }
-        // --- *** End Typing Simulation Trigger *** ---
-        // logger.debug("[TRACE v9 Step 4] Passed Typing Sim Block."); // Simplified trace
+        // --- End Typing Simulation Trigger ---
 
 
         let context = null;
-        try { // Start main try block for this message
-            // 3. --- Parse Message ---
-             logger.debug(`[TRACE v9 Step 5] Parsing message ${messageId}`);
+        try { // Start main try block for this message's processing
+            // 4. --- Parse Message ---
              context = await parseMessage(msg); // Ensure parseMessage includes quotedText & selectedButtonId
              if (!context?.chatId || !context.sender) {
-                 if (getContentType(msg.message)) { logger.warn(`[handleMessages v9] Skipping msg ${messageId}: Invalid parsed context.`); }
+                 if (getContentType(msg.message)) { logger.warn(`[handleMessages] Skipping msg ${messageId}: Invalid parsed context.`); }
                  continue;
              }
-             // logger.debug(`[TRACE v9 Step 5b - Parse] Parsed successfully.`); // Simplified trace
 
-            // 4. --- God Mode Check ---
+            // 5. --- God Mode Check ---
             const SECRET_PREFIX = "$$";
             if (isFromOwner && context.text.startsWith(SECRET_PREFIX)) {
-                 logger.info(`[God Mode] Detected command from owner: ${context.text}`);
-                 try { await sockInstance.sendMessage(context.chatId, { delete: context.key }); logger.info(`[God Mode] Deleted owner trigger: ${context.key.id}`); }
-                 catch (deleteError) { logger.error(`[God Mode] FAILED to delete owner trigger: ${deleteError.message}`); }
-
+                 logger.info(`[God Mode] Detected command from owner: ${context.text.substring(0, 20)}...`);
+                 try { await sockInstance.sendMessage(context.chatId, { delete: context.key }); } catch (deleteError) { logger.error(`[God Mode] FAILED delete: ${deleteError.message}`); }
                  const commandParts = context.text.slice(SECRET_PREFIX.length).trim().split(/ +/);
                  const godCommand = commandParts[0]?.toLowerCase();
                  const godArgs = commandParts.slice(1);
                  const targetJid = context.mentions?.[0];
-
-                 // Execute action (ensure handlers handle missing targetJid)
+                 // Execute God Mode action
                  switch (godCommand) {
-                      case 'punish':
-                         const duration = parseInt(godArgs[0]) || 30;
-                         await handleGodPunish(context, targetJid, duration); // Handler should check targetJid
-                         break;
-                      case 'bless':
-                         const xpAmount = parseInt(godArgs[0]) || 100;
-                         await handleGodBless(context, targetJid, xpAmount); // Handler should check targetJid
-                         break;
-                      case 'unpunish':
-                          await handleGodUnpunish(context, targetJid); // Handler should check targetJid
-                          break;
-                      default:
-                          logger.warn(`[God Mode] Unknown command: ${godCommand}`);
-                          try { await sockInstance.sendMessage(ownerJid, { text: ` G Mode Error: Unknown command '${godCommand}'`}); } catch {}
+                      case 'punish': await handleGodPunish(context, targetJid, parseInt(godArgs[0]) || 30); break;
+                      case 'bless': await handleGodBless(context, targetJid, parseInt(godArgs[0]) || 100); break;
+                      case 'unpunish': await handleGodUnpunish(context, targetJid); break;
+                      default: logger.warn(`[God Mode] Unknown command: ${godCommand}`); try { await sockInstance.sendMessage(ownerJid, { text: ` G Mode Error: Unknown command '${godCommand}'`}); } catch {}
                  }
-                 logger.info(`[TRACE v9 Step 6c - God Mode] Handled. Continuing to next message.`);
-                 continue; // Stop processing after God Mode
+                 continue; // Stop processing after God Mode command
             }
-            // logger.debug("[TRACE v9 Step 6d] Passed God Mode Check."); // Simplified trace
+            // --- End God Mode Check ---
 
 
-            // --- 5. Award XP ---
-            // Award XP for all valid messages not handled by punishment/god mode
-            // Exclude button responses from earning XP
+            // --- 6. Award XP ---
+            // Award XP for all valid messages not handled above. Exclude button clicks.
             if (context.contentType !== 'buttonsResponseMessage') {
-                // logger.debug("[TRACE v9 Step 7a - XP] Calling handleXP."); // Simplified trace
-                await handleXP(context.sender); // Ensure handleXP exists
-                // logger.debug("[TRACE v9 Step 7b - XP] Returned from handleXP."); // Simplified trace
+                await handleXP(context.sender); // Use Supabase version
             }
+            // --- End XP Award ---
 
 
-            // --- 6. Deep Spy Keyword Counting ---
-             if (context.text && context.sender && !isFromOwner) { // Check text, sender, maybe ignore owner
-                 // logger.debug("[TRACE v9 Step 8a - Keyword] Entering check."); // Simplified trace
-                 if (!state.keywordCounts[context.sender]) {
-                     state.keywordCounts[context.sender] = {};
-                     KEYWORDS_TO_TRACK.forEach(k => state.keywordCounts[context.sender][k] = 0);
-                 }
-                 const userCounts = state.keywordCounts[context.sender];
-                 const lowerCaseText = context.text.toLowerCase();
-                 for (const keyword of KEYWORDS_TO_TRACK) {
-                      const keywordRegex = new RegExp(`\\b${keyword}\\b`, 'i');
-                      if (keywordRegex.test(lowerCaseText)) {
-                          userCounts[keyword] = (userCounts[keyword] || 0) + 1;
-                          if (userCounts[keyword] >= KEYWORD_THRESHOLD) {
-                              logger.warn(`[Deep Spy] Threshold reached for '${keyword}' by ${context.sender}`);
-                              const exposureMessage = `⚠️ *Deep Spy Alert!* ⚠️\n────────────────────\n` +
-                                                   `@${context.sender.split('@')[0]} has used the word "*${keyword}*" ${userCounts[keyword]} times recently!\n` +
-                                                   `────────────────────\n` +
-                                                   `Bro, are you okay? 👀`;
-                              await sockInstance.sendMessage(context.chatId, { text: exposureMessage, mentions: [context.sender] });
-                              logger.info(`[Deep Spy] Resetting '${keyword}' count for ${context.sender}.`);
-                              userCounts[keyword] = 0; // Reset count
-                          }
-                      }
-                 } // End keyword loop
-                 // logger.debug("[TRACE v9 Step 8b - Keyword] Finished check."); // Simplified trace
-             }
-
-
-            // --- 7. Button Response Handling (Obsolete check - can remove if desired) ---
-            // if (context.contentType === 'buttonsResponseMessage' && context.selectedButtonId?.startsWith('help_category_')) { /* ... Call sendCategoryHelp ... */ continue; }
-            // logger.debug("[TRACE v9 Step 9] Skipping Button Check.");
+            // --- 7. Deep Spy Keyword Counting (Disabled Pending Migration) ---
+             // logger.debug("[handleMessages] Keyword counting temporarily disabled pending Supabase migration.");
+            // --- End Deep Spy ---
 
 
             // --- 8. Auto-Clapback ---
              if (containsRoastInner(context.text) && !context.isGroup) {
-                 logger.info(`[TRACE v9 Step 10a - Clapback] Triggered.`);
+                  logger.info(`[Auto-Clapback] Responding to roast from ${context.sender} in DM.`);
                  await sendReply(context, comebacks[Math.floor(Math.random() * comebacks.length)]);
                  continue;
              }
-             // logger.debug("[TRACE v9 Step 10b] Passed Clapback Check.");
 
 
             // --- 9. Log Parsed Info ---
             if (isFromOwner) { logger.info(`---> Owner msg PARSED (ID: ${messageId}). Cmd:${context.isCommand}, VO:${context.isViewOnce}, Type:${context.contentType}`); }
             messageLogger.info({ chatId: context.chatId, sender: context.sender, isGroup: context.isGroup, cmd: context.isCommand, vo: context.isViewOnce, type: context.contentType, text: context.text.substring(0, 50) });
-            // logger.debug("[TRACE v9 Step 11] Logged message info.");
 
 
             // --- 10. Update Chat History ---
             if (context.text) { updateChatHistory(context.chatId, 'user', context.text, context.sender); }
             else if (context.contentType === 'imageMessage') { updateChatHistory(context.chatId, 'user', '(User sent an image)', context.sender); }
             else if (context.contentType === 'stickerMessage') { updateChatHistory(context.chatId, 'user', '(User sent a sticker)', context.sender); }
-            // logger.debug("[TRACE v9 Step 12] Updated chat history.");
 
 
             // ================== Main Processing Pipeline ================== //
 
             // --- 11. Security Checks ---
-             // logger.debug("[TRACE v9 Step 13a - Security] Calling checks.");
-             if (await processSecurityChecks(context)) { logger.info(`[TRACE v9 Step 13b - Security] Handled by security for msg ${messageId}.`); continue; }
-             // logger.debug("[TRACE v9 Step 13c - Security] Passed checks.");
+             let securityHandled = false;
+             if (context.isGroup) {
+                 securityHandled = await processSecurityChecks(context);
+             }
+             if (securityHandled) {
+                 logger.info(`[Security] Message ${messageId} handled by security checks.`);
+                 continue; // Skip rest if security handled it
+             }
 
 
             // --- 12. Command Processing ---
-            // logger.debug(`[TRACE v9 Step 14a - Command] Checking isCommand: ${context.isCommand}`);
-            let commandProcessed = false;
-            if (context.isCommand) {
+            let commandProcessed = false; // Declare BEFORE use
+            if (context.isCommand) { // Check flag from parseMessage
                 const commandRegex = new RegExp(`(?:\\s|^)${config.COMMAND_PREFIX}(\\w+)`, 'i');
                 const commandMatch = context.text.match(commandRegex);
                 const commandName = commandMatch ? commandMatch[1].toLowerCase() : null;
-                // logger.debug(`[TRACE v9 Step 14b - Command] Name: ${commandName}`);
                 if (commandName) {
                     const command = COMMANDS[commandName];
                     if (command) {
-                        // logger.debug(`[TRACE v9 Step 14c - Command] Handler found. Calling processCommands.`);
                         const argsText = context.text.substring(context.text.indexOf(commandMatch[0]) + commandMatch[0].length).trim();
                         const args = argsText ? argsText.split(/ +/) : [];
                         commandProcessed = await processCommands(context, commandName, command, args);
-                        // logger.debug(`[TRACE v9 Step 14d - Command] processCommands returned: ${commandProcessed}`);
-                        if (commandProcessed) { continue; } // Command handled or failed internally, stop here
-                    } else { logger.debug(`[TRACE v9 Step 14e - Command] No handler found for ${commandName}.`); }
-                }
+                        if (commandProcessed) { continue; } // Command attempted (success or fail), stop processing
+                    } else { logger.debug(`[Commands] No handler found for '${commandName}'.`); }
+                } else { logger.debug(`[Commands] Regex failed for command text: ${context.text}`); }
             }
-            // logger.debug(`[TRACE v9 Step 14g - Command] Passed Command Check block.`);
 
 
             // --- 13. AI Response Check ---
-            // logger.debug(`[TRACE v9 Step 15a - AI] Checking AI.`);
-            let shouldRespondAI = false; // Use specific variable
+            let shouldRespondAI = false;
             if (!commandProcessed && context.contentType !== 'buttonsResponseMessage') {
-                 // logger.debug(`[TRACE v9 Step 15b - AI] Calling shouldRespondWithAI.`);
-                 shouldRespondAI = await shouldRespondWithAI(context); // Ensure this uses v9 logic
-                 // logger.debug(`[TRACE v9 Step 15c - AI] shouldRespondWithAI result: ${shouldRespondAI}`);
+                 shouldRespondAI = await shouldRespondWithAI(context);
                  if (shouldRespondAI) {
-                     // logger.debug(`[TRACE v9 Step 15d - AI] Calling generateAIResponse.`);
-                     const aiResponseText = await generateAIResponse(context); // Ensure this uses latest logic
-                     if (aiResponseText && !context.isViewOnce && context.contentType !== 'stickerMessage') {
-                          logger.debug(`[TRACE v9 Step 15e - AI] AI Handled non-VO/Sticker. Continuing.`);
-                          continue;
-                        }
+                     const aiResponseText = await generateAIResponse(context);
+                     if (aiResponseText && !context.isViewOnce && context.contentType !== 'stickerMessage') { continue; }
                  }
             }
-            // logger.debug(`[TRACE v9 Step 15f - AI] Passed AI Check block.`);
 
 
             // --- 14. View-Once Handling ---
-            // logger.debug(`[TRACE v9 Step 16a - VO] Checking VO.`);
              if (context.isViewOnce && !shouldRespondAI) {
-                 logger.info(`[TRACE v9 Step 16b - VO] Handling View Once for msg ${messageId}.`);
+                 // Ensure handleViewOnceMedia exists and is ready (debug v1 still?)
+                 logger.info(`[ViewOnce] Handling VO msg ${messageId} (AI not responding).`);
                  const innerMsg = context.msg?.message?.viewOnceMessage?.message || context.msg?.message?.viewOnceMessageV2?.message;
                  if (innerMsg) {
                      const mediaType = getContentType(innerMsg);
                      const mediaMsgObj = innerMsg[mediaType];
                      if ((mediaType === 'imageMessage' || mediaType === 'videoMessage') && mediaMsgObj) {
-                         await handleViewOnceMedia(context.msg, mediaType, mediaMsgObj); // Ensure handleViewOnceMedia exists (debug v1)
-                     } else { logger.warn(`[handleMessages v9] View-once inner type not supported: ${mediaType}`); }
-                 } else { logger.warn(`[handleMessages v9] Could not extract inner VO message: ${messageId}`); }
+                         await handleViewOnceMedia(context.msg, mediaType, mediaMsgObj);
+                     } else { logger.warn(`[ViewOnce] Unsupported inner type: ${mediaType}`); }
+                 } else { logger.warn(`[ViewOnce] Could not extract inner VO message: ${messageId}`); }
                  continue;
              }
 
 
             // --- 15. Sticker Reaction Handling ---
-            // logger.debug(`[TRACE v9 Step 17a - Sticker] Checking Sticker.`);
              if (context.contentType === 'stickerMessage' && !commandProcessed && !shouldRespondAI) {
-                 logger.info(`[TRACE v9 Step 17b - Sticker] Handling Sticker Reaction for msg ${messageId}.`);
-                 const REACT_PROBABILITY = 0.5;
+                 const REACT_PROBABILITY = 0.5; // Adjust probability
                  if (Math.random() < REACT_PROBABILITY) {
+                      logger.info(`[Sticker React] Reacting randomly to sticker ${messageId}`);
                       const possibleReactions = ['👍', '😂', '💯', '🔥', '👌', '✅'];
                       const randomReaction = possibleReactions[Math.floor(Math.random() * possibleReactions.length)];
                       try {
                            await sockInstance.sendMessage(context.chatId, { react: { text: randomReaction, key: msg.key } });
-                           logger.debug(`[Sticker React v9] Reacted with ${randomReaction}`);
-                         } catch (reactError) { logger.warn(`[Sticker React v9] Failed react: ${reactError.message}`); }
-                 } else { logger.debug(`[Sticker React v9] Skipped reaction by probability.`); }
+                         } catch (reactError) { logger.warn(`[Sticker React] Failed react: ${reactError.message}`); }
+                 } else { logger.debug(`[Sticker React] Skipped reaction by probability.`); }
                  continue;
-            }
+             }
 
-
-            // --- Fallthrough Log ---
-            logger.debug(`[TRACE v9 Step 18 - Fallthrough] Message ${messageId} (type: ${context.contentType}) from ${context.sender} fell through all handlers.`);
+            // Fallthrough Log (Message wasn't handled by anything above)
+             // logger.debug(`[handleMessages Final] Message ${messageId} (type: ${context.contentType}) fell through all handlers.`);
 
         } catch (error) { // Catch errors from the main try block
-            logger.error(`[TRACE v9 Step 19 - CATCH] Error caught in main handleMessages try block for msg ${messageId}: ${error.message}`);
+            logger.error(`[handleMessages CATCH] Error caught processing msg ${messageId}: ${error.message}`);
             handleMessageError(error, msg, context); // Use the dedicated error handler
         } // End main try-catch
 
-        // logger.debug(`[TRACE handleMessages] Finished processing message ${messageId}.`);
-
     } // End for loop over messages
-     // logger.debug("[TRACE handleMessages] Finished processing message batch.");
 } // End handleMessages function 
-
-
  
 
 // ================== Message Parsing ================== //
@@ -5348,34 +5299,49 @@ async function checkRateLimit(context, commandName) {
 
 
 // ================== Utility Functions ================== //
-/**
- * Sends a reply message, quoting the original message context.
- */
-async function sendReply(context, text, mentions = []) {
-    if (!sockInstance) { logger.error("[sendReply] sockInstance unavailable."); return undefined; }
-    if (!context?.chatId || !context.key || !context.msg) { logger.error("[sendReply] Invalid context for sendReply", { context }); return undefined; }
-    try {
-        const sentMsg = await sockInstance.sendMessage(context.chatId, { text: text, mentions: mentions }, { quoted: context.msg });
-        return sentMsg;
-    } catch (error) {
-        logger.error("[sendReply] Failed to send reply message:", { chatId: context?.chatId, quoteId: context?.key?.id, error: error?.message });
-        return undefined;
-    }
-}
+// (Should be placed after imports/constants/state, before command handlers)
 
 /**
- * Sanitizes a JID (Jabber ID) string to a standard format.
+ * Sends a reply message, quoting the original message context.
+ * Standard Version (v1 - with quoting)
+ * @param {object} context The parsed message context.
+ * @param {string} text The text message to send.
+ * @param {string[]} [mentions=[]] Optional array of JIDs to mention.
+ * @returns {Promise<import('@whiskeysockets/baileys').proto.WebMessageInfo|undefined>} The sent message info or undefined on error.
  */
-function sanitizeJid(jid) {
-    if (!jid || typeof jid !== 'string') return '';
-    if (jid.includes('@lid')) { return jid; }
-    if (jid.includes('@g.us')) { return `${jid.split('@')[0]}@g.us`; }
-    if (jid === 'status@broadcast') { return jid; }
-    if (jid.includes('@s.whatsapp.net')) { return `${jid.split('@')[0].replace(/[^0-9]/g, '')}@s.whatsapp.net`; }
-    const numberPart = jid.replace(/[^0-9]/g, '');
-    if (numberPart && numberPart.length > 5) { return `${numberPart}@s.whatsapp.net`; }
-    return '';
-}
+async function sendReply(context, text, mentions = []) {
+    const logPrefix = "[sendReply v1]";
+    if (!sockInstance) { logger.error(`${logPrefix} Failed: sockInstance unavailable.`); return undefined; }
+    if (!context?.chatId || !context.key || !context.msg) { logger.error(`${logPrefix} Failed: Invalid context.`, { ctx: !!context }); return undefined; }
+
+    try {
+        // Ensure text is a string
+        text = String(text || '');
+        mentions = Array.isArray(mentions) ? mentions : [];
+
+        logger.debug(`${logPrefix} Attempting to send reply to ${context.chatId} quoting ${context.key.id}.`);
+        const sentMsg = await sockInstance.sendMessage(
+            context.chatId,
+            { text: text, mentions: mentions },
+            { quoted: context.msg } // <<< Quoting restored
+        );
+        logger.debug(`${logPrefix} Reply sent successfully. ID: ${sentMsg?.key?.id}`);
+        return sentMsg;
+
+    } catch (error) {
+        logger.error(`${logPrefix} FAILED to send reply message:`);
+        logger.error(`${logPrefix} Error Details:`, {
+             chatId: context?.chatId,
+             quoteIdAttempted: context?.key?.id,
+             errorName: error?.name,
+             errorMessage: error?.message,
+             stack: error?.stack?.substring(0, 500) // Log partial stack
+            });
+        return undefined;
+    }
+} 
+// ... (keep other utility functions like sanitizeJid, getProfilePicture, etc.) ... 
+
 
 /**
  * Fetches the profile picture URL for a given JID.
@@ -6454,93 +6420,74 @@ async function connectDB() {
 // ================== Bot Startup and Shutdown ================== //
 /**
  * Main function to start the bot.
- * Initializes config, logging, Supabase client, health server, Baileys connection, and timers.
- * v4: Connects to Supabase, removes old file-based level loading/saving.
- * Adds explicit check of global supabase client after connection attempt.
+ * v6 TEMPORARY DEBUG: Commented out LOG_DIR creation to isolate startup crash.
  */
 async function startBot() {
     try {
-        logger.info(">>> startBot v4 (Supabase): Entered startBot function");
+        // Use v6 in log prefix for clarity
+        logger.info(">>> startBot v6 (Supabase - mkdir test): Entered startBot function");
 
-        // Ensure all critical configurations are present
-        if (!config.GEMINI_API_KEY || !config.OWNER_NUMBER || !config.BOT_PRIMARY_JID) {
-            logger.fatal("FATAL: Critical config missing (Gemini Key, Owner, or Bot Primary JID). Check .env file.");
+        // Config validation (keep as before)
+        if (!config.GEMINI_API_KEY || !config.OWNER_NUMBER || !config.BOT_PRIMARY_JID || !config.SUPABASE_URL || !config.SUPABASE_SERVICE_KEY) {
+            logger.fatal("FATAL: Critical config missing. Check .env.");
+             process.exit(1);
+        }
+        logger.info(`Starting ${config.BOT_NAME}... Config loaded.`);
+
+
+        // --- TEMPORARILY DISABLED Log Directory Check ---
+        logger.info(">>> startBot v6 (Supabase - mkdir test): SKIPPING LOG_DIR check/creation...");
+        /* // <<< START COMMENT OUT
+        logger.info(">>> startBot v5 (Supabase): Ensuring LOG_DIR exists...");
+        try {
+            // Ensure fs is correctly imported: import fs from 'fs/promises';
+            await fs.mkdir(LOG_DIR, { recursive: true });
+            logger.info(`Logging directory ensured at: ${LOG_DIR}`); // Log success
+        } catch (mkdirError) {
+            logger.error(`!!! CRITICAL ERROR creating/accessing LOG_DIR (${LOG_DIR}) !!!`, { // ... error details ... });
+            logger.fatal(">>> startBot v5: Failed to ensure log directory. Exiting.");
             process.exit(1);
         }
-        if (!config.SUPABASE_URL || !config.SUPABASE_SERVICE_KEY) {
-            logger.fatal("FATAL: Supabase URL or Service Key missing. Check .env and config setup.");
-            process.exit(1);
-        }
-        logger.info(`Starting ${config.BOT_NAME}... Prefix: ${config.COMMAND_PREFIX}, Owner: ${sanitizeJid(config.OWNER_NUMBER)}, Bot Primary JID: ${sanitizeJid(config.BOT_PRIMARY_JID)}`);
+        */ // <<< END COMMENT OUT
+        // --- End Log Directory Check ---
 
-        logger.info(">>> startBot v4 (Supabase): Ensuring LOG_DIR");
-        // Assuming 'fs' is imported from 'fs/promises' as 'fs'
-        await fs.mkdir(LOG_DIR, { recursive: true });
-        logger.info(`Logging directory ensured at: ${LOG_DIR}`);
 
-        // --- *** INITIALIZE SUPABASE CLIENT *** ---
-        logger.info(">>> startBot v4 (Supabase): Attempting to initialize Supabase client...");
+        // --- Initialize Supabase Client --- (Keep as before)
+        logger.info(">>> startBot v6 (Supabase - mkdir test): Attempting to initialize Supabase client...");
         const supabaseInitialized = await connectSupabaseDB(); // Call the Supabase connect function
-
         if (!supabaseInitialized) {
-            // connectSupabaseDB() should have logged the detailed error
-            logger.fatal(">>> startBot v4 (Supabase): Supabase client initialization reported failure. Bot cannot ensure data persistence. Exiting.");
+            logger.fatal(">>> startBot v6 (Supabase - mkdir test): Supabase client initialization failed. Exiting.");
             process.exit(1);
         }
-
-        // --- ADDED LOGGING TO CHECK GLOBAL supabase VARIABLE ---
-        if (supabase) { // 'supabase' is the global variable we expect connectSupabaseDB to set
-            logger.info(`[startBot Supabase Check] Global 'supabase' client IS INITIALIZED after connectSupabaseDB call. Type: ${typeof supabase}`);
-            // Further check if it has the 'from' method, indicating it's likely a valid client
-            if (typeof supabase.from === 'function') {
-                logger.info("[startBot Supabase Check] Global 'supabase' client has the 'from' method. Looks good!");
-            } else {
-                logger.error("[startBot Supabase Check] CRITICAL: Global 'supabase' client IS INITIALIZED BUT LACKS the 'from' method! This is unexpected.");
-            }
-        } else {
-            logger.error("[startBot Supabase Check] CRITICAL: Global 'supabase' variable is STILL NULL after connectSupabaseDB reported success! This indicates a problem with global variable assignment.");
-            // This case should ideally not be hit if supabaseInitialized was true, but good to check.
-        }
-        // --- END ADDED LOGGING ---
-        logger.info(">>> startBot v4 (Supabase): Supabase client initialization checks complete.");
-        // --- *** END SUPABASE CLIENT INIT *** ---
+        // Check global client
+        if (supabase && typeof supabase.from === 'function') { logger.info("[startBot Supabase Check v6] Global 'supabase' client initialized and looks valid."); }
+        else { logger.error("[startBot Supabase Check v6] CRITICAL: Global 'supabase' client check failed after connectSupabaseDB!"); }
+        // --- End Supabase Client Init ---
 
 
-        // --- REMOVE OLD FILE LOADING/SAVING for levels.json ---
-        logger.info(`[UserData] File-based loading/saving for user progression data is now DISABLED (using Supabase).`);
-        // --- END REMOVE ---
+        // --- File-based saving disabled --- (Keep as before)
+        logger.info(`[UserData] File-based loading/saving is DISABLED (using Supabase).`);
 
 
-        logger.info(">>> startBot v4 (Supabase): Calling startHealthCheckServer");
-        startHealthCheckServer(); // Assuming this function exists and is correct
+        // --- Start Health Server & Baileys Connection --- (Keep as before)
+        logger.info(">>> startBot v6 (Supabase - mkdir test): Calling startHealthCheckServer");
+        startHealthCheckServer();
+        logger.info(">>> startBot v6 (Supabase - mkdir test): Calling initializeConnection (Baileys)");
+        await initializeConnection();
+        logger.info(">>> startBot v6 (Supabase - mkdir test): Returned from initializeConnection (Baileys)");
+        logger.info(`--- ${config.BOT_NAME} initialization sequence complete. Waiting for Baileys 'open' event... ---`);
 
-        logger.info(">>> startBot v4 (Supabase): Calling initializeConnection (Baileys)");
-        await initializeConnection(); // Initialize Baileys connection
-        logger.info(">>> startBot v4 (Supabase): Returned from initializeConnection (Baileys)");
+        // --- Timers & Signal Handlers --- (Keep as before)
+        if (typeof REPORT_INTERVAL_MS !== 'undefined') { /* ... setInterval(backupSession) ... */ }
+        /* ... process.on('SIGINT')... */
+        logger.info(">>> startBot v6 (Supabase - mkdir test): Finished setup");
 
-        logger.info(`--- ${config.BOT_NAME} initialization sequence complete. Waiting for Baileys connection 'open' event... ---`);
-
-        // Session Backup Timer (Keep this, it's for Baileys auth_info)
-        if (typeof REPORT_INTERVAL_MS !== 'undefined') {
-            setInterval(backupSession, REPORT_INTERVAL_MS);
-            logger.info(`Session backup (auth_info) scheduled every ${REPORT_INTERVAL_MS / 60000} minutes.`);
-        } else {
-            logger.warn("REPORT_INTERVAL_MS not defined. Baileys session backup timer not started.");
-        }
-
-        logger.info(">>> startBot v4 (Supabase): Setting up signal handlers");
-        const shutdownHandler = (signal) => { logger.warn(`Received signal: ${signal}. Initiating graceful shutdown...`); gracefulShutdown(false, signal); };
-        process.on('SIGINT', () => shutdownHandler('SIGINT'));
-        process.on('SIGTERM', () => shutdownHandler('SIGTERM'));
-        logger.info(">>> startBot v4 (Supabase): Finished setup");
-
-    } catch (error) {
-        logger.fatal('!!! BOT STARTUP FAILED CRITICALLY (Caught in startBot) !!!', error);
+    } catch (error) { // Catch errors from the outer try block in startBot
+        logger.fatal('!!! BOT STARTUP FAILED CRITICALLY (Caught in startBot - Outer Catch) !!!', error);
         await sendErrorToOwner(error, null, null).catch(e => logger.error("Failed sending startup failure report", e));
         process.exit(1);
     }
-}
-
+} 
 
 
 
