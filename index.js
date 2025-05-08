@@ -5298,9 +5298,6 @@ async function checkRateLimit(context, commandName) {
 }
 
 
-// ================== Utility Functions ================== //
-// (Should be placed after imports/constants/state, before command handlers)
-
 /**
  * Sends a reply message, quoting the original message context.
  * Standard Version (v1 - with quoting)
@@ -5310,12 +5307,11 @@ async function checkRateLimit(context, commandName) {
  * @returns {Promise<import('@whiskeysockets/baileys').proto.WebMessageInfo|undefined>} The sent message info or undefined on error.
  */
 async function sendReply(context, text, mentions = []) {
-    const logPrefix = "[sendReply v1]";
+    const logPrefix = "[sendReply v1]"; // Standard version
     if (!sockInstance) { logger.error(`${logPrefix} Failed: sockInstance unavailable.`); return undefined; }
     if (!context?.chatId || !context.key || !context.msg) { logger.error(`${logPrefix} Failed: Invalid context.`, { ctx: !!context }); return undefined; }
 
     try {
-        // Ensure text is a string
         text = String(text || '');
         mentions = Array.isArray(mentions) ? mentions : [];
 
@@ -5323,7 +5319,7 @@ async function sendReply(context, text, mentions = []) {
         const sentMsg = await sockInstance.sendMessage(
             context.chatId,
             { text: text, mentions: mentions },
-            { quoted: context.msg } // <<< Quoting restored
+            { quoted: context.msg } // <<< Standard Quoting is Active
         );
         logger.debug(`${logPrefix} Reply sent successfully. ID: ${sentMsg?.key?.id}`);
         return sentMsg;
@@ -5332,14 +5328,15 @@ async function sendReply(context, text, mentions = []) {
         logger.error(`${logPrefix} FAILED to send reply message:`);
         logger.error(`${logPrefix} Error Details:`, {
              chatId: context?.chatId,
-             quoteIdAttempted: context?.key?.id,
+             quoteIdAttempted: context?.key?.id, // The msg key it was trying to quote
              errorName: error?.name,
-             errorMessage: error?.message,
-             stack: error?.stack?.substring(0, 500) // Log partial stack
+             errorMessage: error?.message, // <<< NEED THIS MESSAGE
+             stack: error?.stack?.substring(0, 500)
             });
         return undefined;
     }
-} 
+}
+
 // ... (keep other utility functions like sanitizeJid, getProfilePicture, etc.) ... 
 
 
