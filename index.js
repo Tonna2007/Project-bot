@@ -632,23 +632,12 @@ async function restoreSessionFromBackup() {
 
 
 
-/**
- * Sanitizes a JID (Jabber ID) string to a standard format.
- */
-function sanitizeJid(jid) {
-    if (!jid || typeof jid !== 'string') return '';
-    if (jid.includes('@lid')) { return jid; } // Keep LID JIDs as is
-    if (jid.includes('@g.us')) { return `${jid.split('@')[0]}@g.us`; }
-    if (jid === 'status@broadcast') { return jid; }
-    if (jid.includes('@s.whatsapp.net')) { return `${jid.split('@')[0].replace(/[^0-9]/g, '')}@s.whatsapp.net`; }
-    const numberPart = jid.replace(/[^0-9]/g, '');
-    if (numberPart && numberPart.length > 5) { return `${numberPart}@s.whatsapp.net`; }
-    return '';
-}
 
 
 // ================== Connection Management ================== //
-// --- Uses local path & calls restore function ---
+// Make sure DisconnectReason is destructured from baileysPkg
+// const { DisconnectReason, ... } = baileysPkg;
+
 /*/**
  * Initializes the main WhatsApp connection using Baileys.
  * Handles authentication state loading/saving and socket event listeners.
@@ -819,7 +808,9 @@ sock.ev.on('presence.update', ({ id, presences }) => {
     logger.info('Socket initialized and all core event listeners attached.');
     return sock; // Return the initialized socket
 }
- 
+  
+  
+  
 
 /**
  * Handles the reconnection logic when the connection closes unexpectedly.
@@ -1015,6 +1006,8 @@ async function handleMessages({ messages, type }) {
 
     for (const msg of messages) {
         const messageId = msg.key?.id || 'N/A';
+        logger.debug(`[handleMessages Entry] Msg ID: ${msg.key?.id}, Socket ReadyState: ${sockInstance?.ws?.readyState}`);
+        // --- END ADD ---
 
         // 1. --- Ignore Irrelevant Messages ---
         if (msg.key?.remoteJid === 'status@broadcast' || msg.key?.fromMe || !msg.message || !msg.key?.remoteJid) {
@@ -5299,46 +5292,106 @@ async function checkRateLimit(context, commandName) {
 
 
 /**
- * Sends a reply message, quoting the original message context.
- * Standard Version (v1 - with quoting)
- * @param {object} context The parsed message context.
+ * Sends a reply message, manually constructing contextInfo for quoting.
+ * v6: Manually builds contextInfo for more reliable group replies.
+ * @param {object} context The parsed message context. Must contain chatId, key, msg, sender.
  * @param {string} text The text message to send.
  * @param {string[]} [mentions=[]] Optional array of JIDs to mention.
  * @returns {Promise<import('@whiskeysockets/baileys').proto.WebMessageInfo|undefined>} The sent message info or undefined on error.
  */
 async function sendReply(context, text, mentions = []) {
-    const logPrefix = "[sendReply v1]"; // Standard version
-    if (!sockInstance) { logger.error(`${logPrefix} Failed: sockInstance unavailable.`); return undefined; }
-    if (!context?.chatId || !context.key || !context.msg) { logger.error(`${logPrefix} Failed: Invalid context.`, { ctx: !!context }); return undefined; }
+    const logPrefix = "[sendReply v6 ManualQuote]"; // Log prefix for clarity
 
-    try {
-        text = String(text || '');
-        mentions = Array.isArray(mentions) ? mentions : [];
-
-        logger.debug(`${logPrefix} Attempting to send reply to ${context.chatId} quoting ${context.key.id}.`);
-        const sentMsg = await sockInstance.sendMessage(
-            context.chatId,
-            { text: text, mentions: mentions },
-            { quoted: context.msg } // <<< Standard Quoting is Active
-        );
-        logger.debug(`${logPrefix} Reply sent successfully. ID: ${sentMsg?.key?.id}`);
-        return sentMsg;
-
-    } catch (error) {
-        logger.error(`${logPrefix} FAILED to send reply message:`);
-        logger.error(`${logPrefix} Error Details:`, {
-             chatId: context?.chatId,
-             quoteIdAttempted: context?.key?.id, // The msg key it was trying to quote
-             errorName: error?.name,
-             errorMessage: error?.message, // <<< NEED THIS MESSAGE
-             stack: error?.stack?.substring(0, 500)
+    if (!sockInstance) {
+        logger.error(`${logPrefix} Failed: sockInstance unavailable.`);
+        return undefined;
+    }
+    if (!context?.chatId || !context.key || !context.msg || !context.sender) {
+        logger.error(`${logPrefix} Failed: Invalid context received.`, {
+             hasChatId: !!context?.chatId,
+             hasKey: !!context?.key,
+             hasMsg: !!context?.msg,
+             hasSender: !!context?.sender
             });
         return undefined;
     }
+
+    try {
+        text = String(text || ''); // Ensure text is a string
+        mentions = Array.isArray(mentions) ? mentions : [];
+
+        // --- Manually Construct contextInfo for Quoting ---
+        // This gives more control and can be more reliable
+        const quotedMessageInfo = {
+            key: {
+                remoteJid: context.chatId,
+                fromMe: context.key.fromMe, // Use fromMe status of the original message
+                id: context.key.id,
+                participant: context.key.participant || undefined // Participant of the original message
+            },
+            message: context.msg.message // The actual message object of the original message
+        };
+        // --- End contextInfo Construction ---
+
+
+        logger.debug(`${logPrefix} Attempting to send to ${context.chatId}, quoting msg ID ${context.key.id}. Mentions: ${mentions.length}. Text: "${text.substring(0,50)}..."`);
+
+        const messagePayload = {
+            text: text,
+            mentions: mentions,
+            // Add the manually constructed contextInfo for quoting
+            contextInfo: {
+                quotedMessage: quotedMessageInfo.message, // The message object itself
+                participant: quotedMessageInfo.key.participant, // Sender of the quoted message
+                stanzaId: quotedMessageInfo.key.id // ID of the quoted message
+                // MentionedJid can also be added here if needed, but often handled by top-level mentions
+            }
+        };
+
+        // For DMs or if the original sender was the bot itself, participant in contextInfo might be an issue or not needed.
+        // Baileys often handles this okay if participant is undefined for DMs.
+        if (!context.isGroup || quotedMessageInfo.key.fromMe) {
+            // If it's a DM reply or replying to bot's own message, participant might not be relevant in contextInfo.
+            // Let Baileys handle it, or explicitly remove if it causes issues.
+            // delete messagePayload.contextInfo.participant; // Test this if DMs fail
+        }
+
+
+        const sentMsg = await sockInstance.sendMessage(
+            context.chatId,
+            messagePayload
+            // No separate options object with { quoted: ... } needed when contextInfo is manually built
+        );
+
+        logger.info(`${logPrefix} Message sent successfully to ${context.chatId}. ID: ${sentMsg?.key?.id}`);
+        return sentMsg;
+
+    } catch (error) {
+        // Detailed Error Logging (Keep from previous debug version)
+        logger.error(`${logPrefix} FAILED to send reply message:`);
+        logger.error(`${logPrefix} Context Chat ID: ${context?.chatId}`);
+        logger.error(`${logPrefix} Context Sender : ${context?.sender || 'N/A'}`);
+        logger.error(`${logPrefix} Trigger Msg Key: ${context?.key?.id}`);
+        logger.error(`${logPrefix} Error Name: ${error?.name || 'N/A'}`);
+        logger.error(`${logPrefix} Error Message: ${error?.message || 'N/A'}`);
+        logger.error(`${logPrefix} Error Code: ${error?.code || 'N/A'}`);
+        logger.error(`${logPrefix} Error Stack (Partial): ${error?.stack?.substring(0, 600) || 'N/A'}`);
+        return undefined;
+    }
 }
-
-// ... (keep other utility functions like sanitizeJid, getProfilePicture, etc.) ... 
-
+/**
+ * Sanitizes a JID (Jabber ID) string to a standard format.
+ */
+function sanitizeJid(jid) {
+    if (!jid || typeof jid !== 'string') return '';
+    if (jid.includes('@lid')) { return jid; }
+    if (jid.includes('@g.us')) { return `${jid.split('@')[0]}@g.us`; }
+    if (jid === 'status@broadcast') { return jid; }
+    if (jid.includes('@s.whatsapp.net')) { return `${jid.split('@')[0].replace(/[^0-9]/g, '')}@s.whatsapp.net`; }
+    const numberPart = jid.replace(/[^0-9]/g, '');
+    if (numberPart && numberPart.length > 5) { return `${numberPart}@s.whatsapp.net`; }
+    return '';
+}
 
 /**
  * Fetches the profile picture URL for a given JID.
@@ -5353,6 +5406,10 @@ async function getProfilePicture(jid) {
         return config.DEFAULT_AVATAR;
     }
 }
+ 
+ 
+ 
+
 
 /**
  * Downloads media content from a message object using Baileys utility.
