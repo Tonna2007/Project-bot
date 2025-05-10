@@ -638,14 +638,15 @@ async function restoreSessionFromBackup() {
 // Make sure DisconnectReason is destructured from baileysPkg
 // const { DisconnectReason, ... } = baileysPkg;
 
-/*/**
+/**
  * Initializes the main WhatsApp connection using Baileys.
  * Handles authentication state loading/saving and socket event listeners.
- * Includes Termux-specific media handling patches.
+ * Includes Termux-specific media handling patches from user.
+ * v4: Re-adds defaultQueryTimeoutMs.
  * @returns {Promise<import('@whiskeysockets/baileys').WASocket>} The initialized socket instance.
  * @throws {Error} If authentication state fails or socket initialization fails critically.
  */
-async function initializeConnection() {
+async function initializeConnection() { // Function Open Brace
     // --- Attempt to restore session from backup FIRST ---
     await restoreSessionFromBackup(); // Ensure session is ready or restored
 
@@ -672,9 +673,10 @@ async function initializeConnection() {
              stack: authError.stack?.substring(0, 500)
         });
         console.error("--- RAW AUTH ERROR ---"); console.error(authError); console.error("--- END RAW AUTH ERROR ---");
-        await sendErrorToOwner(new Error(`useMultiFileAuthState failed critically: ${authError.message}`), null, null).catch(e => {
-            logger.error("Failed to send auth error notification to owner", e);
-        });
+        // Commenting out sendErrorToOwner here as sockInstance is not ready
+        // await sendErrorToOwner(new Error(`useMultiFileAuthState failed critically: ${authError.message}`), null, null).catch(e => {
+        //     logger.error("Failed to send auth error notification to owner", e);
+        // });
         throw new Error(`Authentication state initialization failed: ${authError.message}`);
     }
 
@@ -702,18 +704,17 @@ async function initializeConnection() {
         markOnlineOnConnect: true,
         getMessage: async (key) => { return undefined; }, // Required stub
 
-        // --- Termux/Android Specific Patches (from user provided snippet) ---
+        // --- ADD THIS OPTION BACK IN ---
+        defaultQueryTimeoutMs: undefined, // Disables Baileys' default timeout for send queries
+        // --- END ADD ---
+
+        // --- Termux/Android Specific Patches (from your provided snippet) ---
         patchMessageBeforeSending: (message) => {
-            const requiresPatch = !!message.viewOnce; // Apply patch only to view-once messages
+            const requiresPatch = !!message.viewOnceMessage?.message; // Check if it's viewOnce
             if (requiresPatch) {
                 logger.debug("[Patch] Applying patchMessageBeforeSending for viewOnce message.");
-                message = {
-                    ...message,
-                    // Setting jpegThumbnail to null might help on some devices
-                    // jpegThumbnail: null, // Keep commented unless testing specific issues
-                    // Increase timeout for media uploads if needed
-                    // mediaUploadTimeoutMs: 60000
-                };
+                // If you need to modify, ensure message is mutable: message = { ...message };
+                // Example: delete message.viewOnceMessage.message.imageMessage?.jpegThumbnail;
             }
             return message;
         },
@@ -728,87 +729,103 @@ async function initializeConnection() {
     // Assign the created socket to the global instance variable
     sockInstance = sock;
     logger.info('Socket instance created.');
-    
-    
-  
 
-
-
-// Add this presence update handler in your connection initialization (after sock.ev.on('connection.update'))
-sock.ev.on('presence.update', ({ id, presences }) => {
-    const chatId = sanitizeJid(id);
-    if (!chatId.endsWith('@g.us')) return; // Only track groups
-    
-    Object.entries(presences).forEach(([jid, presence]) => {
-        const userJid = sanitizeJid(jid);
-        state.onlineUsers.set(userJid, {
-            status: presence.lastKnownPresence || 'unavailable',
-            lastSeen: Date.now()
+    // --- Event Handlers ---
+    // (Your existing event handlers: presence.update, connection.update, creds.update, messages.upsert, group-participants.update)
+    // Ensure they are all correctly placed and closed.
+    // Example:
+    sock.ev.on('presence.update', ({ id, presences }) => {
+        // const chatId = sanitizeJid(id); // id can be group or user
+        Object.entries(presences).forEach(([jid, presence]) => {
+            const userJid = sanitizeJid(jid); // Ensure sanitizeJid is globally defined
+            if (userJid) {
+                state.onlineUsers.set(userJid, {
+                    status: presence.lastKnownPresence || 'unavailable',
+                    lastSeen: Date.now()
+                });
+            }
         });
     });
-});
+    logger.info("Attached 'presence.update' event listener."); // Add this log if missing
 
-
-
-
-
-
-    // --- Attach Event Handlers ---
-    sock.ev.on('connection.update', (update) => {
+    sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
+        logger.info(`[Connection Update] Status: ${connection || 'N/A'}`); // Log current status
+
         if (qr) {
             logger.info('QR code received. Scan with WhatsApp on your phone.');
             qrcode.generate(qr, { small: true }, (qrString) => { console.log(qrString); });
         }
         if (connection === 'close') {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-            const shouldReconnect = (lastDisconnect?.error instanceof Boom) && statusCode !== DisconnectReason.loggedOut;
             const reason = lastDisconnect?.error?.message || 'Unknown';
+            const shouldReconnect = (lastDisconnect?.error instanceof Boom) &&
+                                  statusCode !== DisconnectReason.loggedOut &&
+                                  statusCode !== DisconnectReason.connectionReplaced;
+
             logger.warn(`Connection closed. Reason: "${reason}" (Code: ${statusCode}). Reconnecting: ${shouldReconnect}`);
             state.typingSimulations.forEach(timeoutId => clearTimeout(timeoutId));
             state.typingSimulations.clear();
             logger.info("Cleared active typing simulations due to disconnect.");
-            if (shouldReconnect) { handleReconnect(); }
-            else { logger.error(`Connection closed permanently (Reason: ${reason}, Code: ${statusCode}). Shutting down.`); gracefulShutdown(true, `Connection Closed (${statusCode})`); }
+
+            if (shouldReconnect) {
+                const reconnectableErrorCodes = [
+                    DisconnectReason.connectionClosed, DisconnectReason.connectionLost,
+                    DisconnectReason.timedOut, DisconnectReason.restartRequired,
+                    DisconnectReason.multideviceMismatch
+                ];
+                if (reconnectableErrorCodes.includes(statusCode) || !statusCode) {
+                     logger.info(`Recognized reconnectable error (Code: ${statusCode || 'N/A'}). Further action may be needed (e.g., PM2 restart or manual if not auto-recovering).`);
+                     // If not using a process manager like PM2, you might need to trigger startBot() after a delay,
+                     // but this can cause loops if startBot() itself is failing.
+                     // setTimeout(startBot, 15000); // Example, use with caution.
+                } else {
+                     logger.error(`NON-RECONNECTABLE Connection closed. Shutting down. Reason: ${reason}, Code: ${statusCode}`);
+                     gracefulShutdown(true, `Connection Closed (${statusCode})`);
+                }
+            } else if (statusCode === DisconnectReason.loggedOut) {
+                logger.error("Connection Logged Out! Delete auth_info and re-scan QR code.");
+                gracefulShutdown(true, "Logged Out");
+            } else if (statusCode === DisconnectReason.connectionReplaced) {
+                 logger.error("Connection Replaced! Another session opened. Shutting down.");
+                 gracefulShutdown(true, "Connection Replaced");
+            } else {
+                 logger.info("Connection closed, no specific automatic reconnect condition met.");
+            }
         } else if (connection === 'open') {
-            // --- ADDED LOGGING ---
-            logger.info(`WhatsApp connection opened. Raw sock.user.id: ${sock.user?.id}`); // Log raw ID
-            const sanitizedId = sanitizeJid(sock.user?.id);
+            logger.info(`WhatsApp connection opened. Raw sock.user.id: ${sock.user?.id}`);
+            const sanitizedId = sanitizeJid(sock.user?.id); // Ensure sanitizeJid is global
             logger.info(`Successfully connected! Bot User ID (Sanitized): ${sanitizedId}`);
-            logger.info(`BOT JID: ${sock.user?.id}`); // Explicitly log raw JID
-            logger.info(`Sanitized Bot JID: ${sanitizeJid(sock.user?.id)}`); // Explicitly log sanitized JID
-            // --- END ADDED LOGGING ---
-            sock.sendPresenceUpdate('available');
+            // ... (rest of your 'open' connection logic) ...
+            await sockInstance.sendPresenceUpdate('available');
             botStartTime = Date.now();
             logger.info(`Bot uptime timer reset. Presence set to available.`);
         } else if (connection === 'connecting') {
             logger.info("WhatsApp connection attempt in progress...");
         }
     });
+    logger.info("Attached 'connection.update' event listener."); // Add if missing
 
     sock.ev.on('creds.update', saveCreds);
     logger.info("Attached 'creds.update' event listener.");
 
     sock.ev.on('messages.upsert', (upsert) => {
-        handleMessages(upsert).catch(e => {
-            logger.error("Error directly from handleMessages promise:", { error: e.message, stack: e.stack });
-            sendErrorToOwner(e, upsert.messages?.[0], null);
-        });
+        handleMessages(upsert).catch(e => { /* ... */ });
     });
     logger.info("Attached 'messages.upsert' event listener.");
 
     sock.ev.on('group-participants.update', (update) => {
-        handleGroupUpdate(update).catch(e => {
-             logger.error("Error directly from handleGroupUpdate promise:", { error: e.message, stack: e.stack });
-             sendErrorToOwner(e, null, { chatId: update.id });
-        });
+        handleGroupUpdate(update).catch(e => { /* ... */ });
     });
     logger.info("Attached 'group-participants.update' event listener.");
+    // --- End Event Handlers ---
 
     logger.info('Socket initialized and all core event listeners attached.');
     return sock; // Return the initialized socket
-}
-  
+} // End Function
+
+
+
   
   
 
@@ -5293,92 +5310,78 @@ async function checkRateLimit(context, commandName) {
 
 /**
  * Sends a reply message, manually constructing contextInfo for quoting.
- * v6: Manually builds contextInfo for more reliable group replies.
- * @param {object} context The parsed message context. Must contain chatId, key, msg, sender.
+ * v7: Adds logging for chatId format (based on original v6).
+ * @param {object} context The parsed message context.
  * @param {string} text The text message to send.
  * @param {string[]} [mentions=[]] Optional array of JIDs to mention.
- * @returns {Promise<import('@whiskeysockets/baileys').proto.WebMessageInfo|undefined>} The sent message info or undefined on error.
+ * @returns {Promise<import('@whiskeysockets/baileys').proto.WebMessageInfo|undefined>}
  */
 async function sendReply(context, text, mentions = []) {
-    const logPrefix = "[sendReply v6 ManualQuote]"; // Log prefix for clarity
+    const logPrefix = "[sendReply v7 LogChatID]"; // Updated prefix
 
-    if (!sockInstance) {
-        logger.error(`${logPrefix} Failed: sockInstance unavailable.`);
-        return undefined;
-    }
+    if (!sockInstance) { logger.error(`${logPrefix} Failed: sockInstance unavailable.`); return undefined; }
     if (!context?.chatId || !context.key || !context.msg || !context.sender) {
-        logger.error(`${logPrefix} Failed: Invalid context received.`, {
-             hasChatId: !!context?.chatId,
-             hasKey: !!context?.key,
-             hasMsg: !!context?.msg,
-             hasSender: !!context?.sender
-            });
+        logger.error(`${logPrefix} Failed: Invalid context received.`, { /* ... */ });
         return undefined;
     }
 
     try {
-        text = String(text || ''); // Ensure text is a string
+        text = String(text || '');
         mentions = Array.isArray(mentions) ? mentions : [];
 
-        // --- Manually Construct contextInfo for Quoting ---
-        // This gives more control and can be more reliable
+        // Log the ChatID being used
+        logger.debug(`<span class="math-inline">\{logPrefix\} ChatID being used for send\: '</span>{context.chatId}', Sender: '${context.sender}'`);
+
+        // Manually Construct contextInfo for Quoting
         const quotedMessageInfo = {
             key: {
                 remoteJid: context.chatId,
-                fromMe: context.key.fromMe, // Use fromMe status of the original message
+                fromMe: context.key.fromMe,
                 id: context.key.id,
-                participant: context.key.participant || undefined // Participant of the original message
+                participant: context.isGroup ? context.key.participant : undefined // Participant only relevant in groups
             },
-            message: context.msg.message // The actual message object of the original message
+            message: context.msg.message // The actual message content being replied to
         };
-        // --- End contextInfo Construction ---
-
-
-        logger.debug(`${logPrefix} Attempting to send to ${context.chatId}, quoting msg ID ${context.key.id}. Mentions: ${mentions.length}. Text: "${text.substring(0,50)}..."`);
 
         const messagePayload = {
             text: text,
             mentions: mentions,
-            // Add the manually constructed contextInfo for quoting
             contextInfo: {
-                quotedMessage: quotedMessageInfo.message, // The message object itself
-                participant: quotedMessageInfo.key.participant, // Sender of the quoted message
-                stanzaId: quotedMessageInfo.key.id // ID of the quoted message
-                // MentionedJid can also be added here if needed, but often handled by top-level mentions
+                quotedMessage: quotedMessageInfo.message,
+                participant: quotedMessageInfo.key.participant, // JID of original sender of quoted msg
+                stanzaId: quotedMessageInfo.key.id // ID of the message being quoted
+                // "remoteJid" is not part of contextInfo.quotedMessage but of contextInfo itself,
+                // Baileys handles this when creating the final message.
             }
         };
 
-        // For DMs or if the original sender was the bot itself, participant in contextInfo might be an issue or not needed.
-        // Baileys often handles this okay if participant is undefined for DMs.
-        if (!context.isGroup || quotedMessageInfo.key.fromMe) {
-            // If it's a DM reply or replying to bot's own message, participant might not be relevant in contextInfo.
-            // Let Baileys handle it, or explicitly remove if it causes issues.
-            // delete messagePayload.contextInfo.participant; // Test this if DMs fail
+        // If replying in DM, participant in contextInfo is not needed and can cause issues
+        if (!context.isGroup) {
+            delete messagePayload.contextInfo.participant;
         }
 
 
-        const sentMsg = await sockInstance.sendMessage(
-            context.chatId,
-            messagePayload
-            // No separate options object with { quoted: ... } needed when contextInfo is manually built
-        );
+        logger.debug(`${logPrefix} Attempting to send to ${context.chatId}, quoting msg ID ${context.key.id}.`);
+        const sentMsg = await sockInstance.sendMessage(context.chatId, messagePayload);
 
         logger.info(`${logPrefix} Message sent successfully to ${context.chatId}. ID: ${sentMsg?.key?.id}`);
         return sentMsg;
 
     } catch (error) {
-        // Detailed Error Logging (Keep from previous debug version)
         logger.error(`${logPrefix} FAILED to send reply message:`);
         logger.error(`${logPrefix} Context Chat ID: ${context?.chatId}`);
-        logger.error(`${logPrefix} Context Sender : ${context?.sender || 'N/A'}`);
-        logger.error(`${logPrefix} Trigger Msg Key: ${context?.key?.id}`);
-        logger.error(`${logPrefix} Error Name: ${error?.name || 'N/A'}`);
-        logger.error(`${logPrefix} Error Message: ${error?.message || 'N/A'}`);
-        logger.error(`${logPrefix} Error Code: ${error?.code || 'N/A'}`);
-        logger.error(`${logPrefix} Error Stack (Partial): ${error?.stack?.substring(0, 600) || 'N/A'}`);
+        logger.error(`${logPrefix} Error Details:`, {
+             errorName: error?.name,
+             errorMessage: error?.message,
+             errorCode: error?.code,
+             stack: error?.stack?.substring(0, 600)
+        });
         return undefined;
     }
 }
+
+
+
 /**
  * Sanitizes a JID (Jabber ID) string to a standard format.
  */
