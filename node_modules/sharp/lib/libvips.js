@@ -18,9 +18,9 @@ const minimumLibvipsVersion = semverCoerce(minimumLibvipsVersionLabelled).versio
 
 const prebuiltPlatforms = [
   'darwin-arm64', 'darwin-x64',
-  'linux-arm', 'linux-arm64', 'linux-s390x', 'linux-x64',
+  'linux-arm', 'linux-arm64', 'linux-ppc64', 'linux-s390x', 'linux-x64',
   'linuxmusl-arm64', 'linuxmusl-x64',
-  'win32-ia32', 'win32-x64'
+  'win32-arm64', 'win32-ia32', 'win32-x64'
 ];
 
 const spawnSyncOptions = {
